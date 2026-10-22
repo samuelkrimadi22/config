@@ -1,0 +1,85 @@
+// config/passport.js - Google OAuth Strategy untuk Clipora
+const passport = require('passport');
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const db = require('../database/db');
+const logger = require('../utils/logger');
+
+passport.use(new GoogleStrategy({
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    callbackURL: process.env.GOOGLE_CALLBACK_URL,
+    scope: ['profile', 'email'],
+}, async (accessToken, refreshToken, profile, done) => {
+    try {
+        const email = profile.emails && profile.emails[0] ? profile.emails[0].value : null;
+        const googleId = profile.id;
+        const name = profile.displayName || 'Google User';
+        const avatar = profile.photos && profile.photos[0] ? profile.photos[0].value : null;
+
+        if (!email) {
+            return done(new Error('Email tidak tersedia dari Google'), null);
+        }
+
+        // 1. Cek user dengan google_id
+        let result = await db.query(
+            'SELECT * FROM users WHERE google_id = $1',
+            [googleId]
+        );
+
+        if (result.rows.length > 0) {
+            const user = result.rows[0];
+            await db.query(
+                'UPDATE users SET avatar_url = $1, last_login = NOW() WHERE id = $2',
+                [avatar, user.id]
+            );
+            logger.info(`[Google Auth] Existing Google user login: ${email}`);
+            return done(null, user);
+        }
+
+        // 2. Cek user dengan email yang sama (dari login lokal)
+        result = await db.query(
+            'SELECT * FROM users WHERE email = $1',
+            [email]
+        );
+
+        if (result.rows.length > 0) {
+            const user = result.rows[0];
+            await db.query(
+                'UPDATE users SET google_id = $1, avatar_url = $2, auth_provider = $3, last_login = NOW() WHERE id = $4',
+                [googleId, avatar, 'google', user.id]
+            );
+            logger.info(`[Google Auth] Linked existing email: ${email}`);
+            return done(null, user);
+        }
+
+        // 3. User baru → daftar otomatis
+        const newUser = await db.query(
+            `INSERT INTO users (email, name, google_id, avatar_url, auth_provider, created_at, last_login)
+             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+             RETURNING *`,
+            [email, name, googleId, avatar, 'google']
+        );
+
+        logger.info(`[Google Auth] New user registered: ${email}`);
+        return done(null, newUser.rows[0]);
+
+    } catch (err) {
+        logger.error('[Google Auth] Error:', err);
+        return done(err, null);
+    }
+}));
+
+passport.serializeUser((user, done) => {
+    done(null, user.id);
+});
+
+passport.deserializeUser(async (id, done) => {
+    try {
+        const result = await db.query('SELECT * FROM users WHERE id = $1', [id]);
+        done(null, result.rows[0] || null);
+    } catch (err) {
+        done(err, null);
+    }
+});
+
+module.exports = passport;

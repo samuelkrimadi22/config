@@ -1,0 +1,89 @@
+﻿// config/passport.js - Google OAuth Strategy untuk Clipora
+const passport = require('passport');
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const { dbGet, dbRun } = require('../database/db');
+const logger = require('../utils/logger');
+
+passport.use(new GoogleStrategy({
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    callbackURL: process.env.GOOGLE_CALLBACK_URL,
+    scope: ['profile', 'email'],
+}, async (accessToken, refreshToken, profile, done) => {
+    try {
+        const email = profile.emails && profile.emails[0] ? profile.emails[0].value : null;
+        const googleId = profile.id;
+        const name = profile.displayName || 'Google User';
+        const avatar = profile.photos && profile.photos[0] ? profile.photos[0].value : null;
+
+        if (!email) {
+            return done(new Error('Email tidak tersedia dari Google'), null);
+        }
+
+        console.log('[Google Auth] Login attempt:', email);
+
+        // 1. Cek user dengan google_id
+        let user = await dbGet(
+            'SELECT * FROM users WHERE google_id = $1 LIMIT 1',
+            [googleId]
+        );
+
+        if (user) {
+            await dbRun(
+                'UPDATE users SET avatar_url = $1, last_login = NOW() WHERE id = $2',
+                [avatar, user.id]
+            );
+            console.log('[Google Auth] Existing Google user login:', email);
+            return done(null, user);
+        }
+
+        // 2. Cek user dengan email yang sama (dari login lokal)
+        user = await dbGet(
+            'SELECT * FROM users WHERE email = $1 LIMIT 1',
+            [email]
+        );
+
+        if (user) {
+            await dbRun(
+                'UPDATE users SET google_id = $1, avatar_url = $2, auth_provider = $3, last_login = NOW() WHERE id = $4',
+                [googleId, avatar, 'google', user.id]
+            );
+            console.log('[Google Auth] Linked existing email:', email);
+            return done(null, user);
+        }
+
+        // 3. User baru → daftar otomatis
+        const newUser = await dbGet(
+            `INSERT INTO users (email, full_name, google_id, avatar_url, auth_provider, username, password_hash, created_at, last_login)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+             RETURNING *`,
+            [email, name, googleId, avatar, 'google', email.split('@')[0] + '_' + Date.now(), 'GOOGLE_OAUTH_NO_PASSWORD']
+        );
+
+        console.log('[Google Auth] New user registered:', email);
+        return done(null, newUser);
+
+    } catch (err) {
+        console.error('[Google Auth] Error:', err.message);
+        if (logger && logger.error) {
+            logger.error('[Google Auth] Error: ' + err.message);
+        }
+        return done(err, null);
+    }
+}));
+
+passport.serializeUser((user, done) => {
+    done(null, user.id);
+});
+
+passport.deserializeUser(async (id, done) => {
+    try {
+        const user = await dbGet('SELECT * FROM users WHERE id = $1 LIMIT 1', [id]);
+        done(null, user || null);
+    } catch (err) {
+        console.error('[Google Auth] Deserialize error:', err.message);
+        done(err, null);
+    }
+});
+
+module.exports = passport;

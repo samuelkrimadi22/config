@@ -1,0 +1,390 @@
+<?php
+
+// ============================================================
+// V9.2.0: Load .env file (portability + Midtrans keys)
+// ============================================================
+$envFile = __DIR__ . '/../.env';
+if (file_exists($envFile)) {
+    foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        $line = trim($line);
+        if ($line === '' || $line[0] === '#') continue;
+        if (strpos($line, '=') === false) continue;
+        list($key, $value) = explode('=', $line, 2);
+        $key = trim($key);
+        $value = trim($value, " \t\n\r\0\x0B\"'");
+        if (!getenv($key)) {
+            putenv("$key=$value");
+            $_ENV[$key] = $value;
+        }
+    }
+}
+
+/**
+ * ============================================================
+ * Clipora V8.9.22 - Konfigurasi Global
+ * ============================================================
+ * File: config/config.php
+ * Deskripsi: Konfigurasi utama + helper auth
+ * Changelog V8.9.22:
+ *   - Fix session lifetime (dari 7 hari â†’ 4 jam)
+ *   - Auto-sync session dengan JWT (kalau JWT expired, session dihapus)
+ * ============================================================
+ */
+
+// ============================================================
+// ENVIRONMENT
+// ============================================================
+define('APP_ENV', getenv('APP_ENV') ?: 'development'); // development | production
+
+// ============================================================
+// URL CONFIG
+// ============================================================
+define('BASE_URL', 'http://localhost:3000');
+define('API_URL', 'http://localhost:3000/api');
+
+// ============================================================
+// APP CONFIG
+// ============================================================
+define('APP_NAME', 'Clipora');
+define('APP_VERSION', 'V1.0.0');
+define('APP_TAGLINE', '');
+define('MAX_FILE_SIZE', 500 * 1024 * 1024);
+
+// ============================================================
+// V9.2.0: MIDTRANS
+// ============================================================
+define('MIDTRANS_MODE', getenv('MIDTRANS_MODE') ?: 'sandbox');
+define('MIDTRANS_MERCHANT_ID', getenv('MIDTRANS_MERCHANT_ID') ?: '');
+define('MIDTRANS_CLIENT_KEY', getenv('MIDTRANS_CLIENT_KEY') ?: '');
+define('MIDTRANS_SERVER_KEY', getenv('MIDTRANS_SERVER_KEY') ?: '');
+
+// Snap URL: production vs sandbox
+define('MIDTRANS_SNAP_URL', MIDTRANS_MODE === 'production'
+    ? 'https://app.midtrans.com/snap/snap.js'
+    : 'https://app.sandbox.midtrans.com/snap/snap.js');
+
+// ============================================================
+// COOKIE CONFIG
+// ============================================================
+define('COOKIE_TOKEN', 'clipora_token');
+define('COOKIE_USERNAME', 'clipora_username');
+define('COOKIE_PLAN', 'clipora_plan');
+define('COOKIE_ADMIN', 'clipora_is_admin');
+define('COOKIE_EXPIRE', 7 * 24 * 3600); // 7 hari (untuk JWT, BUKAN session)
+
+// V8.9.22: Session PHP lifetime pendek (4 jam) â€” beda dengan JWT (7 hari)
+// Session hanya untuk state sementara, JWT untuk auth utama
+define('SESSION_LIFETIME', 4 * 3600);   // 4 jam
+
+// ============================================================
+// SESSION START (V8.9.22 â€” Fixed)
+// ============================================================
+if (session_status() === PHP_SESSION_NONE) {
+    $isProduction = (APP_ENV === 'production');
+
+    session_set_cookie_params([
+        'lifetime' => SESSION_LIFETIME,
+        'path' => '/',
+        'domain' => '',
+        'secure' => $isProduction,
+        'httponly' => true,
+        'samesite' => 'Lax'
+    ]);
+
+    // Set GC (garbage collection) supaya file session lama dibersihkan
+    ini_set('session.gc_maxlifetime', SESSION_LIFETIME);
+    ini_set('session.gc_probability', 1);
+    ini_set('session.gc_divisor', 100);
+
+    session_start();
+    // ============================================================
+    // GOOGLE OAUTH TOKEN HANDLER (V9.300.0)
+    // Tangkap token dari redirect Google Login
+    // ============================================================
+    if (isset($_GET['token']) && isset($_GET['login']) && $_GET['login'] === 'google') {
+        $googleToken = $_GET['token'];
+        
+        // Simpan token ke session
+        $_SESSION['clipora_token'] = $googleToken;
+        $_SESSION['login_method'] = 'google';
+        $_SESSION['user_logged_in'] = true;
+        
+        // Extract user_id dari JWT
+        try {
+            $parts = explode('.', $googleToken);
+            if (count($parts) === 3) {
+                $payload = json_decode(
+                    base64_decode(strtr($parts[1], '-_', '+/')),
+                    true
+                );
+                if ($payload && isset($payload['id'])) {
+                    $_SESSION['user_id'] = $payload['id'];
+                }
+                if ($payload && isset($payload['email'])) {
+                    $_SESSION['user_email'] = $payload['email'];
+                    if ($payload && isset($payload['name'])) {
+                    $_SESSION['user_name'] = $payload['name'];
+                }
+                }
+                if ($payload && isset($payload['role'])) {
+                    $_SESSION['user_role'] = $payload['role'];
+                }
+            }
+        } catch (Exception $e) {}
+        
+        // Set cookie auth
+        $cookieExpire = time() + COOKIE_EXPIRE;
+        setcookie(COOKIE_TOKEN, $googleToken, $cookieExpire, '/', '', false, true);
+        
+        error_log('[Google Auth] Token saved to session');
+        
+        // Redirect bersih (hilangkan token dari URL)
+        header('Location: dashboard.php');
+        exit;
+    }
+
+    // V8.9.22: Sinkronisasi session dengan JWT
+    // Kalau JWT expired/invalid tapi session PHP masih ada â†’ paksa logout
+    if (isset($_SESSION['user_id'])) {
+        $authTokenCheck = $_COOKIE[COOKIE_TOKEN] ?? null;
+        $tokenValid = false;
+
+        if ($authTokenCheck) {
+            try {
+                $parts = explode('.', $authTokenCheck);
+                if (count($parts) === 3) {
+                    $payload = json_decode(
+                        base64_decode(strtr($parts[1], '-_', '+/')),
+                        true
+                    );
+                    if ($payload && isset($payload['exp']) && $payload['exp'] > time()) {
+                        $tokenValid = true;
+                    }
+                }
+            } catch (Exception $e) {
+                // Ignore â€” biarkan $tokenValid tetap false
+            }
+        }
+
+        // JWT tidak valid â†’ bersihkan session PHP
+        if (!$tokenValid) {
+            $_SESSION = [];
+            if (ini_get('session.use_cookies')) {
+                $p = session_get_cookie_params();
+                setcookie(
+                    session_name(),
+                    '',
+                    time() - 42000,
+                    $p['path'],
+                    $p['domain'],
+                    $p['secure'],
+                    $p['httponly']
+                );
+            }
+            session_destroy();
+            session_start(); // Start ulang dengan session bersih
+        }
+    }
+
+    // Regenerate session ID untuk cegah session fixation
+    if (!isset($_SESSION['initiated'])) {
+        session_regenerate_id(true);
+        $_SESSION['initiated'] = true;
+    }
+}
+
+// ============================================================
+// AUTH HELPERS
+// ============================================================
+
+/**
+ * Set cookie dengan aman
+ */
+function setSecureCookie($name, $value, $expire = null) {
+    $expire = $expire ?? (time() + COOKIE_EXPIRE);
+    $isProduction = (APP_ENV === 'production');
+    setcookie($name, $value, [
+        'expires' => $expire,
+        'path' => '/',
+        'domain' => '',
+        'secure' => $isProduction,
+        'httponly' => true,
+        'samesite' => 'Lax'
+    ]);
+    $_COOKIE[$name] = $value;
+}
+
+/**
+ * Hapus cookie
+ */
+function deleteSecureCookie($name) {
+    $isProduction = (APP_ENV === 'production');
+    setcookie($name, '', [
+        'expires' => time() - 3600,
+        'path' => '/',
+        'domain' => '',
+        'secure' => $isProduction,
+        'httponly' => true,
+        'samesite' => 'Lax'
+    ]);
+    unset($_COOKIE[$name]);
+}
+
+/**
+ * Ambil auth token dari cookie
+ */
+function getAuthToken() {
+    return $_COOKIE[COOKIE_TOKEN] ?? null;
+}
+
+/**
+ * Set auth token + user info ke cookie
+ */
+function setAuthToken($token, $user = null) {
+    setSecureCookie(COOKIE_TOKEN, $token);
+
+    if ($user) {
+        if (!empty($user['username'])) {
+            setSecureCookie(COOKIE_USERNAME, $user['username']);
+        }
+        if (!empty($user['plan'])) {
+            setSecureCookie(COOKIE_PLAN, $user['plan']);
+        }
+        setSecureCookie(COOKIE_ADMIN, !empty($user['is_admin']) ? '1' : '0');
+    }
+}
+
+/**
+ * Hapus semua auth cookie
+ */
+function clearAuthToken() {
+    deleteSecureCookie(COOKIE_TOKEN);
+    deleteSecureCookie(COOKIE_USERNAME);
+    deleteSecureCookie(COOKIE_PLAN);
+    deleteSecureCookie(COOKIE_ADMIN);
+}
+
+// V9.6.0 SECURITY: Verify JWT signature dengan firebase/php-jwt
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use Firebase\JWT\JWT;
+use Firebase\JWT\Key;
+use Firebase\JWT\ExpiredException;
+use Firebase\JWT\SignatureInvalidException;
+use Firebase\JWT\BeforeValidException;
+
+function decodeJWT($token) {
+    if (!$token) return null;
+    
+    $secret = getenv('JWT_SECRET');
+    if (!$secret || strlen($secret) < 32) {
+        error_log('[SECURITY] JWT_SECRET tidak valid atau tidak di-load');
+        return null;
+    }
+    
+    try {
+        // â­ Verify signature HMAC-SHA256 â€” mencegah tampering
+        $payload = (array) JWT::decode($token, new Key($secret, 'HS256'));
+        return $payload;
+    } catch (ExpiredException $e) {
+        return null;  // Token expired
+    } catch (SignatureInvalidException $e) {
+        error_log('[SECURITY] ðŸš¨ JWT signature INVALID â€” possible tampering! IP: ' . ($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
+        return null;
+    } catch (BeforeValidException $e) {
+        return null;
+    } catch (Exception $e) {
+        error_log('[SECURITY] JWT decode error: ' . $e->getMessage());
+        return null;
+    }
+}
+
+/**
+ * Cek apakah token expired
+ */
+function isTokenExpired($token) {
+    $payload = decodeJWT($token);
+    if (!$payload || !isset($payload['exp'])) return true;
+    return $payload['exp'] < time();
+}
+
+// ============================================================
+// USER STATE
+// ============================================================
+$authToken = getAuthToken();
+$jwtPayload = decodeJWT($authToken);
+
+
+// Login kalau token ada, valid, dan belum expired
+$isLoggedIn = $authToken && $jwtPayload && !isTokenExpired($authToken);
+$userName = $_SESSION['user_name'] ?? ($jwtPayload['name'] ?? null) ?? ($jwtPayload['email'] ?? null);
+
+// Kalau token expired, bersihkan cookie
+if ($authToken && !$isLoggedIn) {
+    clearAuthToken();
+}
+
+if (!$userName && $isLoggedIn) {
+    $userName = $_COOKIE[COOKIE_USERNAME] ?? ($jwtPayload['username'] ?? null);
+}
+$userPlan = $isLoggedIn ? ($_COOKIE[COOKIE_PLAN] ?? 'free') : 'free';
+// V9.6.0 SECURITY FIX: Cek dari JWT payload (sudah di-verify), BUKAN dari cookie
+// JWT payload 'is_admin' berasal dari server â€” tidak bisa dipalsukan
+$isAdmin = $isLoggedIn && !empty($jwtPayload['is_admin']);
+$userId = $isLoggedIn ? ($jwtPayload['userId'] ?? null) : null;
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+/**
+ * Cek apakah user premium/pro/business
+ */
+function isPremium() {
+    global $userPlan;
+    return in_array($userPlan, ['pro', 'business', 'weekly', 'monthly']);
+}
+
+/**
+ * Format durasi (detik ke format readable)
+ */
+function formatDuration($seconds) {
+    if ($seconds < 60) return round($seconds, 1) . 's';
+    $mins = floor($seconds / 60);
+    $secs = round($seconds % 60);
+    return $mins . 'm ' . $secs . 's';
+}
+
+/**
+ * Get badge class untuk plan
+ */
+function getPlanBadgeClass($plan) {
+    $map = [
+        'free' => 'plan-free',
+        'pro' => 'plan-pro',
+        'business' => 'plan-business'
+    ];
+    return $map[$plan] ?? 'plan-free';
+}
+
+/**
+ * Escape HTML dengan aman
+ */
+function e($str) {
+    return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
+}
+
+/**
+ * Redirect dengan aman
+ */
+function redirect($url) {
+    header("Location: $url");
+    exit;
+}
+
+// ============================================================
+// V9.625.0: FORCE ADMIN BUSINESS (setiap request, semua halaman)
+// ============================================================
+if (session_status() === PHP_SESSION_ACTIVE && !empty($_SESSION['is_admin'])) {
+    $_SESSION['user_plan'] = 'business';
+}
