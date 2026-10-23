@@ -28,8 +28,8 @@ if (file_exists($envFile)) {
 
 // 3. Environment Config
 define('APP_ENV', getenv('APP_ENV') ?: 'development');
-define('BASE_URL', 'http://localhost:3000');
-define('API_URL', 'http://localhost:3000/api');
+define('BASE_URL', 'http://38.103.170.165:3000');
+define('API_URL', 'http://38.103.170.165:3000/api');
 
 define('APP_NAME', 'Clipora');
 define('APP_VERSION', 'V1.0.0');
