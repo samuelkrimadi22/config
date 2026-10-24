@@ -151,7 +151,7 @@ function setSecureCookie($name, $value, $expire = null) {
         'expires' => $expire,
         'path' => '/',
         'domain' => '',
-        'secure' => $isProduction,
+        'secure' => false,
         'httponly' => true,
         'samesite' => 'Lax'
     ]);
@@ -168,7 +168,7 @@ function deleteSecureCookie($name) {
         'expires' => time() - 3600,
         'path' => '/',
         'domain' => '',
-        'secure' => $isProduction,
+        'secure' => false,
         'httponly' => true,
         'samesite' => 'Lax'
     ]);
