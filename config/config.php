@@ -65,7 +65,7 @@ if (session_status() === PHP_SESSION_NONE) {
             'lifetime' => SESSION_LIFETIME,
             'path' => '/',
             'domain' => '',
-            'secure' => $isProduction,
+            'secure' => false, // SEMENTARA: agar cookie bisa disimpan di HTTP
             'httponly' => true,
             'samesite' => 'Lax'
         ]);
