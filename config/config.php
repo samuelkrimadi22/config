@@ -133,9 +133,9 @@ if (session_status() === PHP_SESSION_NONE) {
         }
 
         if (!isset($_SESSION['initiated'])) {
-            session_regenerate_id(true);
-            $_SESSION['initiated'] = true;
-        }
+    // session_regenerate_id(true); // <-- Dinonaktifkan sementara untuk debugging
+    $_SESSION['initiated'] = true;
+}
     }
 }
 
